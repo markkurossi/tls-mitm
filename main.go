@@ -29,12 +29,15 @@ const (
 	keyBits = 4096
 )
 
-var config *tls.Config
+var serverConfig *tls.Config
+var clientConfig *tls.Config
 
 func main() {
 	keygen := flag.Bool("keygen", false, "Generate CA and TLS keys.")
-	certgen := flag.String("certgen", "",
-		"Generate TLS certificates with argument subject alternative name.")
+	serverCertgen := flag.String("server-certgen", "",
+		"Generate TLS server certificate with given subject alternative name.")
+	clientCertgen := flag.String("client-certgen", "",
+		"Generate TLS client certificate with given subject alternative name.")
 	listen := flag.String("listen", "", "The address to listen to.")
 	proxy := flag.String("proxy", "", "The address to proxy connections.")
 	flag.Parse()
@@ -46,10 +49,17 @@ func main() {
 		}
 		return
 	}
-	if len(*certgen) > 0 {
-		err := makeCert(*certgen)
+	if len(*serverCertgen) > 0 {
+		err := makeCert("server", *serverCertgen)
 		if err != nil {
-			log.Fatalf("Failed to create certificate: %s\n", err)
+			log.Fatalf("Failed to create server certificate: %s\n", err)
+		}
+		return
+	}
+	if len(*clientCertgen) > 0 {
+		err := makeCert("client", *clientCertgen)
+		if err != nil {
+			log.Fatalf("Failed to create server certificate: %s\n", err)
 		}
 		return
 	}
@@ -66,9 +76,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to load key: %s\n", err)
 	}
-	cert, certBytes, err := loadCert("mitm")
+	serverCert, serverCertBytes, err := loadCert("mitm-server")
 	if err != nil {
-		log.Fatalf("Failed to load certificate: %s\n", err)
+		log.Fatalf("Failed to load server certificate: %s\n", err)
+	}
+	clientCert, clientCertBytes, err := loadCert("mitm-client")
+	if err != nil {
+		log.Fatalf("Failed to load client certificate: %s\n", err)
 	}
 	caCert, _, err := loadCert("mitm-ca")
 	if err != nil {
@@ -77,14 +91,14 @@ func main() {
 	caCertPool := x509.NewCertPool()
 	caCertPool.AddCert(caCert)
 
-	config = &tls.Config{
+	serverConfig = &tls.Config{
 		Certificates: []tls.Certificate{
 			tls.Certificate{
 				Certificate: [][]byte{
-					certBytes,
+					serverCertBytes,
 				},
 				PrivateKey: key,
-				Leaf:       cert,
+				Leaf:       serverCert,
 			},
 		},
 		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
@@ -95,9 +109,29 @@ func main() {
 		RootCAs:            caCertPool,
 		Renegotiation:      tls.RenegotiateFreelyAsClient,
 	}
-	config.BuildNameToCertificate()
+	serverConfig.BuildNameToCertificate()
 
-	listener, err := tls.Listen("tcp", *listen, config)
+	clientConfig = &tls.Config{
+		Certificates: []tls.Certificate{
+			tls.Certificate{
+				Certificate: [][]byte{
+					clientCertBytes,
+				},
+				PrivateKey: key,
+				Leaf:       clientCert,
+			},
+		},
+		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			fmt.Printf("chains: %v\n", verifiedChains)
+			return nil
+		},
+		InsecureSkipVerify: true,
+		RootCAs:            caCertPool,
+		Renegotiation:      tls.RenegotiateFreelyAsClient,
+	}
+	clientConfig.BuildNameToCertificate()
+
+	listener, err := tls.Listen("tcp", *listen, serverConfig)
 	if err != nil {
 		log.Fatalf("TLS listen failed: %s\n", err)
 	}
@@ -117,7 +151,7 @@ func main() {
 func handleConnection(conn net.Conn, proxy string) {
 	defer conn.Close()
 
-	server, err := tls.Dial("tcp", proxy, config)
+	server, err := tls.Dial("tcp", proxy, clientConfig)
 	if err != nil {
 		fmt.Printf("Dial %s failed: %s\n", proxy, err)
 		return
@@ -217,7 +251,7 @@ func makeKeys() error {
 	return ioutil.WriteFile("mitm.prv", keyBytes, 0600)
 }
 
-func makeCert(san string) error {
+func makeCert(role, san string) error {
 	caKey, err := loadKey("mitm-ca")
 	if err != nil {
 		return err
@@ -268,5 +302,5 @@ func makeCert(san string) error {
 	}
 	certBytes, err := x509.CreateCertificate(rand.Reader, cert, caCert,
 		&key.PublicKey, caKey)
-	return ioutil.WriteFile("mitm.crt", certBytes, 0644)
+	return ioutil.WriteFile(fmt.Sprintf("mitm-%s.crt", role), certBytes, 0644)
 }
